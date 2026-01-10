@@ -22,7 +22,7 @@ def _make_notification_from_event(event: dict[str, Any]) -> tuple[NotificationDB
 
     notif = NotificationDB(
         reference=reference,
-        recipient=str(user_id),
+        recipient=f"user{user_id}",
         channel="email",
         message=f"Payment {payment_id} created for user {user_id}.",
         status="pending",

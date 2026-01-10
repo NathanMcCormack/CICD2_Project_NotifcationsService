@@ -13,7 +13,7 @@ envfile = {
     "test": ".env.test",
 }.get(os.getenv("APP_ENV", "dev"), ".env.dev")
 
-load_dotenv(envfile, override=False)
+load_dotenv(envfile, override=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 SQL_ECHO = os.getenv("SQL_ECHO", "false").lower() == "true"
