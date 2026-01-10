@@ -1,29 +1,26 @@
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship 
-from sqlalchemy import String, Integer, ForeignKey
+# app/models.py
+from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-class Base(DeclarativeBase): 
-    pass 
+class Base(DeclarativeBase):
+    pass
 
-class UserDB(Base): 
-    __tablename__ = "users" 
-    
-    id: Mapped[int] = mapped_column(primary_key=True, index=True) 
-    first_name: Mapped[str] = mapped_column(String, nullable=False) 
-    last_name: Mapped[str] = mapped_column(String, nullable=False) 
-    email: Mapped[str] = mapped_column(String, unique=True, nullable=False) 
-    phone: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    age: Mapped[int] = mapped_column(Integer, nullable=False) 
-    student_id: Mapped[str] = mapped_column(String, unique=True, nullable=False) 
-    address: Mapped[list["AddressDB"]] = relationship(back_populates="resident", cascade="all, delete-orphan")
+class NotificationDB(Base):
+    __tablename__ = "notifications"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reference: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    recipient: Mapped[str] = mapped_column(String(255), nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)  # email|sms|push
+    message: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    deliveries: Mapped[list["DeliveryAttemptDB"]] = relationship(back_populates="notification",cascade="all, delete-orphan",)
 
-class AddressDB(Base):
-    __tablename__ = "address"
 
-    id: Mapped[int] =  mapped_column(primary_key=True)
-    address_line1: Mapped[str] = mapped_column(String, nullable=False)
-    address_line2: Mapped[str] = mapped_column(String, nullable=True)
-    apartment_block_number: Mapped[str] = mapped_column(String, nullable=True)
-    county: Mapped[str] = mapped_column(String, nullable=False)
-    post_code: Mapped[str] = mapped_column(String, nullable=False)
-    resident_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    resident: Mapped[UserDB] =  relationship(back_populates="address")
+class DeliveryAttemptDB(Base):
+    __tablename__ = "delivery_attempts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    result: Mapped[str] = mapped_column(String(200), nullable=False)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    notification_id: Mapped[int] = mapped_column(ForeignKey("notifications.id", ondelete="CASCADE"),nullable=False,index=True,)
+    notification: Mapped["NotificationDB"] = relationship(back_populates="deliveries")

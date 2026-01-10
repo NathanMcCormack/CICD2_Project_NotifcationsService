@@ -1,20 +1,38 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Response 
+from contextlib import asynccontextmanager
+from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy import select 
-from sqlalchemy.exc import IntegrityError 
- 
-from .database import engine, SessionLocal 
-from .models import Base, UserDB, AddressDB
-from .schemas import (UserCreate, 
-                      UserRead, 
-                      UserUpdate,
-                      AddressCreate,
-                      AddressRead,
-                      AddressUpdate,
-                      AddressReadWithOwner)
+from app.database import engine, get_db
+from app.models import Base, DeliveryAttemptDB, NotificationDB
+from app.schemas import (
+    DeliveryCreate,
+    DeliveryCreateForNotification,
+    DeliveryRead,
+    DeliveryReadWithNotification,
+    DeliveryUpdate,
+    NotificationCreate,
+    NotificationRead,
+    NotificationReadWithDeliveries,
+    NotificationUpdate,
+)
 
-app = FastAPI()
-Base.metadata.create_all(bind=engine)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
+app = FastAPI(title="Notifications Service", lifespan=lifespan)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def commit_or_rollback(db: Session, error_msg: str):
     try:
@@ -23,172 +41,139 @@ def commit_or_rollback(db: Session, error_msg: str):
         db.rollback()
         raise HTTPException(status_code=409, detail=error_msg)
 
-def get_db(): 
-    db = SessionLocal() 
-    try: 
-        yield db 
-    finally: 
-        db.close() 
-
-#------------- Health Check ---------------------
 @app.get("/health")
-def Health_Check():
-    return {"status": "ok"} 
+def health():
+    return {"status": "ok", "service": "notifications"}
 
-#------------- Users Endpoints ------------------
-
-# GET: All Users, User by ID
-@app.get("/api/users", response_model=list[UserRead]) 
-def list_users(db: Session = Depends(get_db)): 
-    stmt = select(UserDB).order_by(UserDB.id) 
-    return list(db.execute(stmt).scalars()) 
- 
-@app.get("/api/users/{user_id}", response_model=UserRead) 
-def get_user(user_id: int, db: Session = Depends(get_db)): 
-    user = db.get(UserDB, user_id) 
-    if not user: 
-        raise HTTPException(status_code=404, detail="User not found") 
-    return user 
- 
- #POST new user
-@app.post("/api/users", response_model=UserRead, status_code=status.HTTP_201_CREATED) 
-def Add_New_User(payload: UserCreate, db: Session = Depends(get_db)): 
-    user = UserDB(**payload.model_dump()) 
-    db.add(user) 
-    try: 
-        db.commit() 
-        db.refresh(user) 
-    except IntegrityError: 
-        db.rollback() 
-        raise HTTPException(status_code=409, detail="User already exists") 
-    return user 
-
-#PATCH user information - updates only what attributes have been changed 
-@app.patch("/api/users/{user_id}", response_model=UserRead)
-def Update_Partial_User_Information(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)):
-    user = db.get(UserDB, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    updates = payload.model_dump(exclude_unset=True, exclude_none=True) #exclude unset only changes the fields that have been updated 
-    for field, value in updates.items():
-        setattr(user, field, value)
-
-    try:
-        db.commit()
-        db.refresh(user)
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="User update failed (unique constraint)")
-    return user
-
-#PUT user information - updates all user attributes
-@app.put("/api/users/{user_id}", response_model=UserRead)
-def Update_Full_User_Information(user_id: int, payload: UserCreate, db: Session = Depends(get_db)):
-    user = db.get(UserDB, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    for field_name, field_value in payload.model_dump().items():
-        setattr(user, field_name, field_value)
-    try:
-        db.commit()
-        db.refresh(user)
-    except IntegrityError:
-        db.rollback()
-        # email, phone unique conflict, etc.
-        raise HTTPException(status_code=409, detail="User already exists")
-    return user
-
-# DELETE a user by ID (triggers ORM cascade -> deletes their projects too)
-@app.delete("/api/users/{user_id}", status_code=204)
-def Delete_User(user_id: int, db: Session = Depends(get_db)) -> Response:
-    user = db.get(UserDB, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    db.delete(user)  # <-- triggers cascade="all, delete-orphan" on projects
-    db.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-#------------- Address Endpoints ------------------
-#List Addresses
-@app.get("/api/addresses", response_model=list[AddressRead])
-def list_addresses(db: Session = Depends(get_db)):
-    stmt = select(AddressDB).order_by(AddressDB.id)
+# -------------------- Notifications CRUD --------------------
+@app.get("/api/notifications", response_model=list[NotificationRead])
+def list_notifications(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    stmt = select(NotificationDB).order_by(NotificationDB.id).limit(limit).offset(offset)
     return db.execute(stmt).scalars().all()
 
-#Get user address
-@app.get("/api/addresses/{address_id}", response_model=AddressReadWithOwner)
-def Get_User_Address(address_id: int, db: Session = Depends(get_db)):
+@app.get("/api/notifications/{notification_id}", response_model=NotificationReadWithDeliveries)
+def get_notification(notification_id: int, db: Session = Depends(get_db)):
     stmt = (
-        select(AddressDB)
-        .where(AddressDB.id == address_id)
-        .options(selectinload(AddressDB.resident))
+        select(NotificationDB)
+        .where(NotificationDB.id == notification_id)
+        .options(selectinload(NotificationDB.deliveries))
     )
-    addr = db.execute(stmt).scalar_one_or_none()
-    if not addr:
-        raise HTTPException(status_code=404, detail="Address not found")
-    return addr
+    n = db.execute(stmt).scalar_one_or_none()
+    if not n:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return n
 
-@app.post("/api/addresses", response_model=AddressRead, status_code=201)
-def Add_New_Address(address: AddressCreate, db: Session = Depends(get_db)):
-    user = db.get(UserDB, address.resident_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+@app.post("/api/notifications", response_model=NotificationRead, status_code=status.HTTP_201_CREATED)
+def create_notification(payload: NotificationCreate, db: Session = Depends(get_db)):
+    n = NotificationDB(**payload.model_dump(), status="pending")
+    db.add(n)
+    commit_or_rollback(db, "Notification already exists")
+    db.refresh(n)
+    return n
 
-    addr = AddressDB(
-        address_line1 = address.address_line1,
-        address_line2 = address.address_line2,
-        apartment_block_number = address.apartment_block_number,
-        county = address.county,
-        post_code = address.post_code,
-        resident_id = address.resident_id
-    )
-    db.add(addr)
-    commit_or_rollback(db, "Address creation failed")
-    db.refresh(addr)
-    return addr
+@app.patch("/api/notifications/{notification_id}", response_model=NotificationRead)
+def patch_notification(notification_id: int, payload: NotificationUpdate, db: Session = Depends(get_db)):
+    n = db.get(NotificationDB, notification_id)
+    if not n:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(n, k, v)
+    commit_or_rollback(db, "Notification update failed")
+    db.refresh(n)
+    return n
 
-@app.patch("/api/addresses/{address_id}", response_model=AddressRead)
-def update_project(project_id: int, payload: AddressUpdate, db: Session = Depends(get_db)):
-    address = db.get(AddressDB, project_id)
-    if not address:
-        raise HTTPException(status_code=404, detail="Address not found")
+@app.put("/api/notifications/{notification_id}", response_model=NotificationRead)
+def put_notification(notification_id: int, payload: NotificationCreate, db: Session = Depends(get_db)):
+    n = db.get(NotificationDB, notification_id)
+    if not n:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    #full update
+    n.reference = payload.reference
+    n.recipient = payload.recipient
+    n.channel = payload.channel
+    n.message = payload.message
+    commit_or_rollback(db, "Notification update failed")
+    db.refresh(n)
+    return n
 
-    updates = payload.model_dump(exclude_unset=True, exclude_none=True) #exclude unset only changes the fields that have been updated 
-    for field, value in updates.items():
-        setattr(address, field, value)
-
-    try:
-        db.commit()
-        db.refresh(address)
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Address update failed (unique constraint)")
-    return address
-
-@app.put("/api/addresses/{address_id}", response_model=AddressRead)
-def update_project(project_id: int, payload: AddressCreate, db: Session = Depends(get_db)):
-    address = db.get(AddressDB, project_id)
-    if not address:
-        raise HTTPException(status_code=404, detail="Address not found")
-    for field_name, field_value in payload.model_dump().items():
-        setattr(address, field_name, field_value)
-    try:
-        db.commit()
-        db.refresh(address)
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Address already exists")
-    return address
-
-# DELETE a user by ID (triggers ORM cascade -> deletes their projects too)
-@app.delete("/api/adrdesses/{adrdess_id}", status_code=204)
-def Delete_Address(address_id: int, db: Session = Depends(get_db)) -> Response:
-    address = db.get(AddressDB, address_id)
-    if not address:
-        raise HTTPException(status_code=404, detail="Address not found")
-
-    db.delete(address)  # <-- triggers cascade="all, delete-orphan" on projects
+@app.delete("/api/notifications/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_notification(notification_id: int, db: Session = Depends(get_db)):
+    n = db.get(NotificationDB, notification_id)
+    if not n:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    db.delete(n)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# -------------------- Delivery Attempts CRUD --------------------
+@app.get("/api/deliveries", response_model=list[DeliveryRead])
+def list_deliveries(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+    stmt = select(DeliveryAttemptDB).order_by(DeliveryAttemptDB.id).limit(limit).offset(offset)
+    return db.execute(stmt).scalars().all()
+
+@app.get("/api/deliveries/{delivery_id}", response_model=DeliveryReadWithNotification)
+def get_delivery(delivery_id: int, db: Session = Depends(get_db)):
+    stmt = (
+        select(DeliveryAttemptDB)
+        .where(DeliveryAttemptDB.id == delivery_id)
+        .options(selectinload(DeliveryAttemptDB.notification))
+    )
+    d = db.execute(stmt).scalar_one_or_none()
+    if not d:
+        raise HTTPException(status_code=404, detail="Delivery attempt not found")
+    return d
+
+@app.post("/api/deliveries", response_model=DeliveryRead, status_code=status.HTTP_201_CREATED)
+def create_delivery(payload: DeliveryCreate, db: Session = Depends(get_db)):
+    n = db.get(NotificationDB, payload.notification_id)
+    if not n:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    d = DeliveryAttemptDB(**payload.model_dump())
+    db.add(d)
+    commit_or_rollback(db, "Delivery attempt creation failed")
+    db.refresh(d)
+    return d
+
+@app.patch("/api/deliveries/{delivery_id}", response_model=DeliveryRead)
+def patch_delivery(delivery_id: int, payload: DeliveryUpdate, db: Session = Depends(get_db)):
+    d = db.get(DeliveryAttemptDB, delivery_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="Delivery attempt not found")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(d, k, v)
+    commit_or_rollback(db, "Delivery attempt update failed")
+    db.refresh(d)
+    return d
+
+@app.delete("/api/deliveries/{delivery_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_delivery(delivery_id: int, db: Session = Depends(get_db)):
+    d = db.get(DeliveryAttemptDB, delivery_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="Delivery attempt not found")
+    db.delete(d)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+@app.get("/api/notifications/{notification_id}/deliveries", response_model=list[DeliveryRead])
+def list_notification_deliveries(notification_id: int, db: Session = Depends(get_db)):
+    n = db.get(NotificationDB, notification_id)
+    if not n:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    stmt = select(DeliveryAttemptDB).where(DeliveryAttemptDB.notification_id == notification_id)
+    return db.execute(stmt).scalars().all()
+
+@app.post("/api/notifications/{notification_id}/deliveries",response_model=DeliveryRead,status_code=status.HTTP_201_CREATED,)
+def create_notification_delivery(notification_id: int,payload: DeliveryCreateForNotification,db: Session = Depends(get_db),):
+    n = db.get(NotificationDB, notification_id)
+    if not n:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    d = DeliveryAttemptDB(notification_id=notification_id, **payload.model_dump())
+    db.add(d)
+    commit_or_rollback(db, "Delivery attempt creation failed")
+    db.refresh(d)
+    return d
