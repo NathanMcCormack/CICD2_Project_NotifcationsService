@@ -7,9 +7,7 @@ from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import NotificationDB, DeliveryAttemptDB
 
-
 QUEUE_NAME = os.getenv("PAYMENTS_QUEUE", "payments")
-
 
 def _make_notification_from_event(event: dict[str, Any]) -> tuple[NotificationDB, DeliveryAttemptDB]:
     """
@@ -36,7 +34,6 @@ def _make_notification_from_event(event: dict[str, Any]) -> tuple[NotificationDB
     )
     return notif, attempt
 
-
 def handle_message(db: Session, body: bytes) -> None:
     """
     Process one RabbitMQ message and persist the notification.
@@ -55,7 +52,6 @@ def handle_message(db: Session, body: bytes) -> None:
 
     db.add(notif)
     db.commit()
-
 
 def run_worker() -> None:
     rabbit_url = os.getenv("RABBIT_URL")

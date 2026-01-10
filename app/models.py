@@ -15,7 +15,6 @@ class NotificationDB(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     deliveries: Mapped[list["DeliveryAttemptDB"]] = relationship(back_populates="notification",cascade="all, delete-orphan",)
 
-
 class DeliveryAttemptDB(Base):
     __tablename__ = "delivery_attempts"
     id: Mapped[int] = mapped_column(primary_key=True)
